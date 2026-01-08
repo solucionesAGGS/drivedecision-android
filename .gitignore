@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+# IDE / Kotlin
+.kotlinc/
+.kotlin/
+*.log
+
+# Android Studio / IntelliJ
+.idea/
+
