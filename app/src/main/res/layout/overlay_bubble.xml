@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<TextView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/bubble"
-    android:layout_width="56dp"
-    android:layout_height="56dp"
-    android:gravity="center"
-    android:text="DD"
-    android:textStyle="bold"
-    android:textColor="@android:color/white"
-    android:background="#111111" />
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <TextView
+        android:id="@+id/btnBubble"
+        android:layout_width="54dp"
+        android:layout_height="54dp"
+        android:gravity="center"
+        android:text="DD"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        android:textColor="#FFFFFF"
+        android:background="@drawable/dd_bubble_bg" />
+</FrameLayout>

@@ -1,37 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/root"
+    android:id="@+id/rootMain"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="18dp"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:padding="18dp">
 
     <TextView
         android:id="@+id/tvTitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="DriveDecision"
-        android:textSize="20sp"
         android:textStyle="bold"
-        android:paddingBottom="10dp"/>
+        android:textSize="22sp"
+        android:paddingBottom="12dp" />
 
     <Button
-        android:id="@+id/btnStartOverlay"
+        android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Iniciar Overlay (Burbuja)" />
+        android:text="Empezar" />
 
     <Button
-        android:id="@+id/btnStopOverlay"
+        android:id="@+id/btnStop"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Detener Overlay"
-        android:layout_marginTop="10dp"/>
+        android:layout_marginTop="10dp"
+        android:text="Finalizar" />
+
+    <Button
+        android:id="@+id/btnSetup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="Setup" />
 
     <TextView
-        android:id="@+id/tvHint"
+        android:id="@+id/tvStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="1) Inicia overlay\n2) Dale permiso 'Mostrar sobre otras apps'\n3) Activa accesibilidad del servicio\n4) Abre InDrive y presiona LEER"
-        android:layout_marginTop="16dp"/>
+        android:layout_marginTop="18dp"
+        android:text="Estado: listo"
+        android:textSize="14sp" />
+
 </LinearLayout>

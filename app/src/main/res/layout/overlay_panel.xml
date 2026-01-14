@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/panelRoot"
-    android:layout_width="match_parent"
+    android:layout_width="300dp"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="12dp"
-    android:background="@android:color/white">
+    android:padding="10dp"
+    android:background="@drawable/dd_panel_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -13,37 +13,33 @@
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/btnLeer"
+            android:id="@+id/btnAnalyze"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="LEER" />
+            android:text="Analizar" />
 
         <Button
-            android:id="@+id/btnOcr"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:text="OCR" />
-
-        <Button
-            android:id="@+id/btnCerrar"
+            android:id="@+id/btnClose"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
             android:text="X" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/tvOutput"
+    <!-- Scroll para que el texto no se haga infinito -->
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="Salida..."
-        android:textSize="12sp"
-        android:textColor="@android:color/black"
-        android:padding="10dp"
-        android:background="#EEEEEE" />
+        android:layout_height="160dp"
+        android:fillViewport="true"
+        android:paddingTop="8dp">
+
+        <TextView
+            android:id="@+id/tvOutput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#FFFFFF"
+            android:text="--- RESULTADOS ---" />
+    </ScrollView>
 
 </LinearLayout>

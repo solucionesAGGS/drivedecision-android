@@ -1,3 +1,4 @@
+// app/src/main/java/com/drivedecision/app/access/DriveAccessibilityService.kt
 package com.drivedecision.app.access
 
 import android.accessibilityservice.AccessibilityService
@@ -11,24 +12,16 @@ import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.drivedecision.app.DDContracts
 
 class DriveAccessibilityService : AccessibilityService() {
 
     private val TAG = "DD_ACC"
-
-    companion object {
-        const val ACTION_READ_REQUEST = "com.drivedecision.app.ACTION_READ_REQUEST"
-        const val ACTION_READ_RESULT  = "com.drivedecision.app.ACTION_READ_RESULT"
-        const val EXTRA_RESULT_TEXT   = "extra_result_text"
-
-        const val INDRIVE_PACKAGE = "sinet.startup.inDriver"
-    }
-
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val requestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_READ_REQUEST) {
+            if (intent?.action == DDContracts.ACTION_READ_REQUEST) {
                 Log.d(TAG, "📥 READ_REQUEST recibido ✅")
                 readNowAndSendWithRetry()
             }
@@ -39,7 +32,7 @@ class DriveAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.d(TAG, "✅ onServiceConnected (Accessibility activo)")
 
-        val filter = IntentFilter(ACTION_READ_REQUEST)
+        val filter = IntentFilter(DDContracts.ACTION_READ_REQUEST)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(requestReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -54,7 +47,7 @@ class DriveAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Lo dejamos “on demand” (solo cuando presionas LEER).
+        // on-demand
     }
 
     override fun onInterrupt() {}
@@ -114,10 +107,10 @@ class DriveAccessibilityService : AccessibilityService() {
     }
 
     private fun sendResult(text: String) {
-        Log.d(TAG, "📤 Enviando RESULT (chars=${text.length})")
-        val i = Intent(ACTION_READ_RESULT).apply {
+        Log.d(TAG, "📤 Enviando READ_RESULT (chars=${text.length})")
+        val i = Intent(DDContracts.ACTION_READ_RESULT).apply {
             setPackage(packageName)
-            putExtra(EXTRA_RESULT_TEXT, text)
+            putExtra(DDContracts.EXTRA_RESULT_TEXT, text)
         }
         sendBroadcast(i)
     }
