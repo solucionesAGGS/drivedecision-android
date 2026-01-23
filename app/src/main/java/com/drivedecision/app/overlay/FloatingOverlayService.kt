@@ -43,7 +43,8 @@ class FloatingOverlayService : Service() {
                     lastAccText = if (t.isBlank()) "(vacío)" else t
                     renderOutput()
                     Log.d(TAG, "⬅️ READ_RESULT len=${lastAccText.length}")
-                    sendBroadcast(Intent(DDContracts.ACTION_OVERLAY_SHOW).apply { setPackage(packageName) })
+                    // Ya tenemos resultado -> vuelve a mostrar overlay (sin broadcasts)
+                    setOverlayVisible(true)
                 }
 
                 DDContracts.ACTION_OCR_RESULT -> {
@@ -51,7 +52,8 @@ class FloatingOverlayService : Service() {
                     lastOcrText = if (t.isBlank()) "(vacío)" else t
                     renderOutput()
 
-                    sendBroadcast(Intent(DDContracts.ACTION_OVERLAY_SHOW).apply { setPackage(packageName) })
+                    // OCR listo -> vuelve a mostrar overlay
+                    setOverlayVisible(true)
                     Log.d(TAG, "⬅️ OCR_RESULT len=${lastOcrText.length}")
                 }
 
@@ -59,7 +61,7 @@ class FloatingOverlayService : Service() {
                     val err = intent.getStringExtra(DDContracts.EXTRA_ERROR) ?: "Need projection"
                     lastOcrText = "❌ $err"
                     renderOutput()
-                    sendBroadcast(Intent(DDContracts.ACTION_OVERLAY_SHOW).apply { setPackage(packageName) })
+                    setOverlayVisible(true)
                     Log.w(TAG, "⬅️ NEED_PROJECTION: $err")
                 }
             }
@@ -74,18 +76,15 @@ class FloatingOverlayService : Service() {
         // Receiver para resultados (ACCESSIBILITY + OCR)
         registerReceiverCompat()
 
-        // Notificación (si ya la traes funcionando, déjala)
+        // Notificación
         createChannelIfNeeded()
         val notification = buildNotification("DriveDecision activo")
 
         try {
-            // OJO: Si ya lo tienes jalando SIN FGS, puedes comentar esto.
-            // Si lo usas, NO metas foregroundServiceType="systemAlertWindow" en manifest (te truena AAPT).
             startForeground(NOTIF_ID, notification)
             Log.d(TAG, "startForeground() OK")
         } catch (t: Throwable) {
             Log.e(TAG, "startForeground() FAILED", t)
-            // Si falla el FGS, aún intentamos overlay (depende tu device/ROM)
         }
 
         // Crea overlay UI
@@ -149,10 +148,7 @@ class FloatingOverlayService : Service() {
         wm?.addView(bubbleView, bubbleParams)
         Log.d(TAG, "bubble added")
 
-        // Click real (tap) -> abre/cierra panel
         bubbleView?.setOnClickListener { togglePanel() }
-
-        // Drag + click coexistentes
         makeDraggableTogether()
     }
 
@@ -190,24 +186,25 @@ class FloatingOverlayService : Service() {
         panelView?.findViewById<View>(R.id.btnAnalyze)?.setOnClickListener {
             Log.d(TAG, "btnAnalyze click -> ACCESS + OCR (hide overlay)")
 
-            // 0) Marca estado en UI
             lastAccText = "(leyendo...)"
             lastOcrText = "(capturando...)"
             renderOutput()
 
-            // 1) Oculta overlay para que NO tape cajitas (solo el panel o todo, tú decides)
-            sendBroadcast(Intent(DDContracts.ACTION_OVERLAY_HIDE).apply { setPackage(packageName) })
+            // 1) Oculta overlay DE VERDAD
+            setOverlayVisible(false)
 
-            // 2) ACCESSIBILITY -> broadcast request (esto sí es broadcast)
+            // 2) ACCESSIBILITY -> broadcast request
             sendBroadcast(Intent(DDContracts.ACTION_READ_REQUEST).apply { setPackage(packageName) })
 
-            // 3) OCR/CAPTURA -> ARRANCA el service (esto NO es broadcast)
-            requestOcrOnce()
-
-            // 4) Failsafe opcional: si por lo que sea no llega respuesta, re-muestra overlay
+            // 3) OCR -> delay para que ya no estorbe el overlay en el frame
             panelView?.postDelayed({
-                sendBroadcast(Intent(DDContracts.ACTION_OVERLAY_SHOW).apply { setPackage(packageName) })
-            }, 2000)
+                requestOcrOnce()
+            }, 280)
+
+            // 4) Failsafe
+            panelView?.postDelayed({
+                setOverlayVisible(true)
+            }, 3000)
         }
 
         panelView?.findViewById<View>(R.id.btnClose)?.setOnClickListener {
@@ -215,7 +212,6 @@ class FloatingOverlayService : Service() {
             detachPanel()
         }
 
-        // Render inicial
         renderOutput()
     }
 
@@ -238,9 +234,6 @@ class FloatingOverlayService : Service() {
         bubbleParams = null
     }
 
-    /**
-     * Drag burbuja + panel juntos, pero deja pasar el "tap" como click real.
-     */
     private fun makeDraggableTogether() {
         var startX = 0
         var startY = 0
@@ -288,9 +281,7 @@ class FloatingOverlayService : Service() {
                 }
 
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) {
-                        v.performClick() // dispara setOnClickListener -> togglePanel()
-                    }
+                    if (!moved) v.performClick()
                     true
                 }
 
@@ -311,8 +302,6 @@ class FloatingOverlayService : Service() {
         tvOutput?.text = out
     }
 
-    // ---------------- OCR trigger ----------------
-
     private fun requestOcrOnce() {
         val i = Intent(this, ScreenOcrService::class.java).apply {
             action = DDContracts.ACTION_OCR_REQUEST
@@ -327,8 +316,6 @@ class FloatingOverlayService : Service() {
             Log.e(TAG, "start ScreenOcrService failed", t)
         }
     }
-
-    // --------------- Notification ---------------
 
     private fun createChannelIfNeeded() {
         if (Build.VERSION.SDK_INT < 26) return
@@ -354,8 +341,6 @@ class FloatingOverlayService : Service() {
             .addAction(0, "Cerrar", closePi)
             .build()
     }
-
-    // --------------- Receiver register ---------------
 
     private fun registerReceiverCompat() {
         val filter = IntentFilter().apply {

@@ -44,4 +44,7 @@ dependencies {
 
     // ML Kit OCR
     implementation("com.google.mlkit:text-recognition:16.0.0")
+
+    // OpenCV Android (AAR oficial desde 4.9.0)
+    implementation("org.opencv:opencv:4.9.0")
 }

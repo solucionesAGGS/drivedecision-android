@@ -24,13 +24,33 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.drivedecision.app.DDContracts
+import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.nio.ByteBuffer
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
+/**
+ * ScreenOcrService (FULLSCREEN TEXT → TD candidates)
+ *
+ * Cambio clave vs versiones anteriores:
+ * - NO recorta al mapRect.
+ * - NO depende de OpenCV para detectar forma.
+ * - Hace 1 OCR (MLKit) sobre TODA la captura.
+ * - De los bloques/lineas arma candidatos "TIEMPO + DISTANCIA" agrupando por cercanía.
+ * - Elige 2 candidatos por distancia: min=pickup, max=total.
+ *
+ * Esto aguanta:
+ * - botones abajo, paneles, rutas, etc. (porque filtramos por patrón TD).
+ * - que "min" y "km" estén en líneas separadas.
+ */
 class ScreenOcrService : Service() {
 
     companion object {
@@ -53,7 +73,9 @@ class ScreenOcrService : Service() {
 
     private val isCapturing = AtomicBoolean(false)
 
-    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val recognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -97,7 +119,6 @@ class ScreenOcrService : Service() {
     // -----------------------------
     // Projection start/stop
     // -----------------------------
-
     private fun handleStartProjection(i: Intent) {
         val resultCode = i.getIntExtra(DDContracts.EXTRA_RESULT_CODE, Int.MIN_VALUE)
         val resultData = getParcelableIntentCompat(i, DDContracts.EXTRA_RESULT_DATA)
@@ -111,14 +132,12 @@ class ScreenOcrService : Service() {
         try {
             val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val mp = mgr.getMediaProjection(resultCode, resultData)
-
             if (mp == null) {
                 Log.e(TAG, "❌ getMediaProjection devolvió null")
                 sendNeedProjection("getMediaProjection devolvió null")
                 return
             }
 
-            // ✅ OBLIGATORIO antes de createVirtualDisplay en algunos devices
             registerProjectionCallbackIfNeeded(mp)
 
             mediaProjection = mp
@@ -169,7 +188,6 @@ class ScreenOcrService : Service() {
     // -----------------------------
     // OCR request flow
     // -----------------------------
-
     private fun handleOcrRequest() {
         val mp = mediaProjection
         if (mp == null) {
@@ -197,8 +215,6 @@ class ScreenOcrService : Service() {
         val w = max(2, screenW)
         val h = max(2, screenH)
 
-        // ✅ FORMATO CORRECTO: RGBA usa PixelFormat.RGBA_8888
-        // ✅ FALLBACK: YUV_420_888 (ImageReader lo soporta bien)
         val formatsToTry = listOf(
             PixelFormat.RGBA_8888,
             android.graphics.ImageFormat.YUV_420_888
@@ -253,6 +269,7 @@ class ScreenOcrService : Service() {
 
         Log.d(TAG, "📸 capturando 1 frame...")
 
+        // Delay pequeño para asegurar frame listo
         mainHandler.postDelayed({
             var img: Image? = null
             try {
@@ -266,7 +283,8 @@ class ScreenOcrService : Service() {
                 val bmp = imageToBitmapSafe(img)
                 Log.d(TAG, "✅ bitmap capturado: ${bmp.width}x${bmp.height} cfg=${bmp.config}")
 
-                runMlKitOcr(bmp)
+                runMlKitOcrFullScreen(bmp)
+
             } catch (t: Throwable) {
                 Log.e(TAG, "❌ Error capturando pantalla: ${t.message}", t)
                 sendOcrError("Error capturando pantalla: ${t.message}")
@@ -274,285 +292,359 @@ class ScreenOcrService : Service() {
                 try { img?.close() } catch (_: Throwable) {}
                 isCapturing.set(false)
             }
-        }, 140)
+        }, 180)
     }
 
+    // =============================
+    // FULLSCREEN OCR → TD candidates
+    // =============================
 
-    private fun runMlKitOcr(bitmap: Bitmap) {
-        Log.d(TAG, "🔎 OCR MLKit iniciando...")
+    private data class TimeDistance(val seconds: Int, val meters: Int)
 
-        val fullImage = InputImage.fromBitmap(bitmap, 0)
-        recognizer.process(fullImage)
-            .addOnSuccessListener { res ->
-                val fullRaw = res.text ?: ""
-                val debug = "blocks=${res.textBlocks.size}\nchars=${fullRaw.length}\n"
-
-                // 1) Detectar cajitas por color (azul y verde)
-                val boxes = detectRouteBoxes(bitmap)
-
-                if (boxes == null) {
-                    // Si no detectamos cajas, regresamos OCR completo como antes (NO rompemos nada)
-                    Log.d(TAG, "⚠️ No se detectaron cajas de color, devolviendo OCR completo")
-                    sendOcrResult(fullRaw, debug)
-                    return@addOnSuccessListener
-                }
-
-                val blueCrop = safeCrop(bitmap, boxes.blueRect)
-                val greenCrop = safeCrop(bitmap, boxes.greenRect)
-
-                // 2) OCR sobre la caja AZUL
-                ocrBitmapText(blueCrop)
-                    .addOnSuccessListener { blueText ->
-                        // 3) OCR sobre la caja VERDE
-                        ocrBitmapText(greenCrop)
-                            .addOnSuccessListener { greenText ->
-
-                                val blueInfo = extractTimeKm(blueText)
-                                val greenInfo = extractTimeKm(greenText)
-
-                                val composed = buildString {
-                                    appendLine("[OCR/CAPTURA]")
-                                    appendLine("=== OCR DIRIGIDO (CAJAS) ===")
-                                    appendLine("AZUL (pickup/tramo): ${blueInfo ?: "(no detectado)"}")
-                                    appendLine("VERDE (ruta total):  ${greenInfo ?: "(no detectado)"}")
-                                }
-
-                                sendOcrResult(composed, debug)
-                            }
-                            .addOnFailureListener { e2 ->
-                                Log.e(TAG, "❌ OCR verde falló: ${e2.message}", e2)
-                                // No rompemos: devolvemos al menos el full OCR
-                                sendOcrResult(fullRaw, debug + "\nverde_fail=${e2.message}")
-                            }
-                    }
-                    .addOnFailureListener { e1 ->
-                        Log.e(TAG, "❌ OCR azul falló: ${e1.message}", e1)
-                        // No rompemos: devolvemos al menos el full OCR
-                        sendOcrResult(fullRaw, debug + "\nazul_fail=${e1.message}")
-                    }
-            }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "❌ OCR fail: ${e.message}", e)
-                sendOcrError("OCR fail: ${e.message}")
-            }
-    }
-
-    private data class RouteBoxes(
-        val blueRect: android.graphics.Rect,
-        val greenRect: android.graphics.Rect
+    private data class TdCandidate(
+        val rect: android.graphics.Rect,
+        val td: TimeDistance,
+        val text: String
     )
 
-    private fun ocrBitmapText(bmp: Bitmap): com.google.android.gms.tasks.Task<String> {
-        val img = InputImage.fromBitmap(bmp, 0)
-        return recognizer.process(img).continueWith { task ->
-            val res = task.result
-            res?.text ?: ""
-        }
-    }
+    private data class Token(
+        val rect: android.graphics.Rect,
+        val text: String,
+        val seconds: Int?,
+        val meters: Int?
+    )
 
-    /**
-     * Extrae algo como: "10 min | 4.2 km" desde texto OCR
-     */
-    private fun extractTimeKm(text: String): String? {
-        val t = text.replace("\n", " ").trim()
+    private fun runMlKitOcrFullScreen(bitmap: Bitmap) {
+        // Todo pesado en background
+        Thread {
+            val t0 = System.currentTimeMillis()
+            try {
+                val img = InputImage.fromBitmap(bitmap, 0)
+                val res = Tasks.await(recognizer.process(img), 1400, TimeUnit.MILLISECONDS)
 
-        // tiempo (ej: "10 min", "2 min.", "14min")
-        val timeRegex = Regex("""(\d{1,3})\s*min\.?""", RegexOption.IGNORE_CASE)
-        val time = timeRegex.find(t)?.groupValues?.getOrNull(1)
+                val candidates = buildTdCandidatesFromText(res)
 
-        // km (ej: "5,6 km", "10.8km")
-        val kmRegex = Regex("""(\d{1,3}(?:[.,]\d{1,2})?)\s*km""", RegexOption.IGNORE_CASE)
-        val kmRaw = kmRegex.find(t)?.groupValues?.getOrNull(1)
-        val km = kmRaw?.replace(",", ".")
+                val dt = System.currentTimeMillis() - t0
 
-        if (time == null && km == null) return null
-
-        return buildString {
-            if (time != null) append("${time} min")
-            if (time != null && km != null) append(" | ")
-            if (km != null) append("${km} km")
-        }
-    }
-
-    /**
-     * Recorta seguro (evita crash si el rect se sale del bitmap)
-     */
-    private fun safeCrop(src: Bitmap, r: android.graphics.Rect): Bitmap {
-        val left = r.left.coerceIn(0, src.width - 1)
-        val top = r.top.coerceIn(0, src.height - 1)
-        val right = r.right.coerceIn(left + 1, src.width)
-        val bottom = r.bottom.coerceIn(top + 1, src.height)
-
-        return Bitmap.createBitmap(src, left, top, right - left, bottom - top)
-    }
-
-    /**
-     * Detecta 2 cajas sólidas por color:
-     * - Azul: caja "A" (tiempo + km del pickup/tramo)
-     * - Verde: caja "B" (tiempo + km total)
-     *
-     * Importante: NO nos vamos por "bbox de todo" porque la ruta verde del mapa te arruina.
-     * Usamos componentes conectados y score por "relleno" (caja sólida gana vs línea delgada).
-     */
-    private fun detectRouteBoxes(bitmap: Bitmap): RouteBoxes? {
-        // Downsample para no matar rendimiento
-        val step = 4
-        val w = bitmap.width / step
-        val h = bitmap.height / step
-        if (w <= 0 || h <= 0) return null
-
-        fun isBlue(px: Int): Boolean {
-            val hsv = FloatArray(3)
-            android.graphics.Color.colorToHSV(px, hsv)
-            val hue = hsv[0]
-            val sat = hsv[1]
-            val v = hsv[2]
-            // Azul UI típico (cajita)
-            return hue in 185f..255f && sat > 0.25f && v > 0.20f
-        }
-
-        fun isGreen(px: Int): Boolean {
-            val hsv = FloatArray(3)
-            android.graphics.Color.colorToHSV(px, hsv)
-            val hue = hsv[0]
-            val sat = hsv[1]
-            val v = hsv[2]
-            // Verde/amarillo-verde típico (cajita)
-            return hue in 55f..150f && sat > 0.20f && v > 0.25f
-        }
-
-        // Máscara por color
-        val blue = BooleanArray(w * h)
-        val green = BooleanArray(w * h)
-
-        for (yy in 0 until h) {
-            val y = yy * step
-            for (xx in 0 until w) {
-                val x = xx * step
-                val px = bitmap.getPixel(x, y)
-                val idx = yy * w + xx
-                blue[idx] = isBlue(px)
-                green[idx] = isGreen(px)
-            }
-        }
-
-        fun bestComponent(mask: BooleanArray): android.graphics.Rect? {
-            val visited = BooleanArray(mask.size)
-            var bestScore = 0.0
-            var bestRect: android.graphics.Rect? = null
-
-            val qx = IntArray(mask.size)
-            val qy = IntArray(mask.size)
-
-            fun push(ix: Int, iy: Int, tail: Int): Int {
-                qx[tail] = ix
-                qy[tail] = iy
-                return tail + 1
-            }
-
-            for (iy in 0 until h) {
-                for (ix in 0 until w) {
-                    val p = iy * w + ix
-                    if (!mask[p] || visited[p]) continue
-
-                    // BFS
-                    var head = 0
-                    var tail = 0
-                    tail = push(ix, iy, tail)
-                    visited[p] = true
-
-                    var minX = ix
-                    var maxX = ix
-                    var minY = iy
-                    var maxY = iy
-                    var count = 0
-
-                    while (head < tail) {
-                        val cx = qx[head]
-                        val cy = qy[head]
-                        head++
-
-                        count++
-                        if (cx < minX) minX = cx
-                        if (cx > maxX) maxX = cx
-                        if (cy < minY) minY = cy
-                        if (cy > maxY) maxY = cy
-
-                        // 4 vecinos
-                        fun tryAdd(nx: Int, ny: Int) {
-                            if (nx !in 0 until w || ny !in 0 until h) return
-                            val np = ny * w + nx
-                            if (!mask[np] || visited[np]) return
-                            visited[np] = true
-                            tail = push(nx, ny, tail)
-                        }
-
-                        tryAdd(cx + 1, cy)
-                        tryAdd(cx - 1, cy)
-                        tryAdd(cx, cy + 1)
-                        tryAdd(cx, cy - 1)
-                    }
-
-                    // Convertir a rect en coords originales
-                    val rect = android.graphics.Rect(
-                        minX * step,
-                        minY * step,
-                        (maxX + 1) * step,
-                        (maxY + 1) * step
+                if (candidates.isEmpty()) {
+                    sendOcrResult(
+                        "[OCR/CAPTURA]\n❌ No encontré candidatos TIEMPO+DISTANCIA en toda la pantalla.\n" +
+                                "Tip: evita que el overlay tape las cajitas.\n" +
+                                "(t=${dt}ms)"
                     )
+                    return@Thread
+                }
 
-                    val rectW = rect.width().coerceAtLeast(1)
-                    val rectH = rect.height().coerceAtLeast(1)
-                    val area = (rectW * rectH).toDouble()
+                val sorted = candidates.sortedBy { it.td.meters }
+                if (sorted.size == 1) {
+                    val c = sorted.first()
+                    sendOcrResult(
+                        buildString {
+                            append("[OCR/CAPTURA]\n")
+                            append("=== OCR (TEXTO→TD) ===\n")
+                            append("Candidatos TD: 1\n")
+                            append("BOX1: ${formatTimeDistance(c.td)}\n")
+                            append("(Solo 1 box válida detectada)\n")
+                            append("(t=${dt}ms)")
+                        }
+                    )
+                    return@Thread
+                }
 
-                    // score por "relleno": caja sólida (muchos pixeles dentro del bbox) gana
-                    val fill = count / area
-                    val score = (count.toDouble() * fill)
+                val pickup = sorted.first()
+                val total = sorted.last()
 
-                    // filtros para evitar basura demasiado chica
-                    if (area < 1200.0) continue
+                val debugList = sorted
+                    .take(8)
+                    .mapIndexed { i, c ->
+                        val r = c.rect
+                        "C${i + 1}: ${formatTimeDistance(c.td)}  rect=[${r.left},${r.top},${r.right},${r.bottom}]  txt='${c.text.take(60)}'"
+                    }.joinToString("\n")
 
-                    // filtros para evitar líneas larguísimas (ruta)
-                    val aspect = rectW.toDouble() / rectH.toDouble()
-                    if (aspect < 0.45 || aspect > 3.0) continue
+                val out = buildString {
+                    append("[OCR/CAPTURA]\n")
+                    append("=== OCR (TEXTO→TD) ===\n")
+                    append("Candidatos TD: ${sorted.size}\n")
+                    append("PICKUP (min): ${formatTimeDistance(pickup.td)}\n")
+                    append("TOTAL  (max): ${formatTimeDistance(total.td)}\n")
+                    append("\n-- debug candidatos (top 8) --\n")
+                    append(debugList)
+                    append("\n(t=${dt}ms)")
+                }
 
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestRect = rect
-                    }
+                sendOcrResult(out)
+
+            } catch (t: Throwable) {
+                Log.e(TAG, "OCR failed: ${t.message}", t)
+                sendOcrError("OCR falló: ${t.message}")
+            }
+        }.start()
+    }
+
+    private fun buildTdCandidatesFromText(text: Text): List<TdCandidate> {
+        val tokens = ArrayList<Token>(64)
+
+        // 1) Tomamos líneas (más estable que blocks completos) y sacamos:
+        // - tokens con tiempo-only
+        // - tokens con dist-only
+        // - tokens con ambos
+        for (b in text.textBlocks) {
+            for (l in b.lines) {
+                val bb = l.boundingBox ?: continue
+                val raw = l.text ?: continue
+                val norm = normalizeOcrText(raw)
+
+                val sec = parseSeconds(norm)
+                val m = parseMeters(norm)
+
+                if (sec != null || m != null) {
+                    tokens += Token(rect = bb, text = norm, seconds = sec, meters = m)
+                }
+            }
+        }
+
+        if (tokens.isEmpty()) return emptyList()
+
+        val both = tokens.filter { it.seconds != null && it.meters != null }
+            .map {
+                TdCandidate(it.rect, TimeDistance(it.seconds!!, it.meters!!), it.text)
+            }.toMutableList()
+
+        val timeOnly = tokens.filter { it.seconds != null && it.meters == null }
+        val distOnly = tokens.filter { it.meters != null && it.seconds == null }
+
+        // 2) Emparejar timeOnly con distOnly cercanos para formar una "caja"
+        val paired = ArrayList<TdCandidate>(16)
+        val usedDist = BooleanArray(distOnly.size)
+
+        fun overlapRatioX(a: android.graphics.Rect, b: android.graphics.Rect): Float {
+            val inter = max(0, min(a.right, b.right) - max(a.left, b.left))
+            val minW = max(1, min(a.width(), b.width()))
+            return inter.toFloat() / minW.toFloat()
+        }
+
+        // Ventanas adaptativas: relativo a tamaño de línea
+        fun isClose(t: Token, d: Token): Boolean {
+            val cxT = (t.rect.left + t.rect.right) / 2
+            val cxD = (d.rect.left + d.rect.right) / 2
+            val cyT = (t.rect.top + t.rect.bottom) / 2
+            val cyD = (d.rect.top + d.rect.bottom) / 2
+
+            val dx = abs(cxT - cxD)
+            val dy = abs(cyT - cyD)
+
+            val maxLineW = max(t.rect.width(), d.rect.width())
+            val maxLineH = max(t.rect.height(), d.rect.height())
+
+            val okX = dx <= (maxLineW * 0.75f).toInt().coerceAtLeast(120)
+            val okY = dy <= (maxLineH * 2.2f).toInt().coerceAtLeast(140)
+
+            // Si están alineados en X, mejor
+            val ov = overlapRatioX(t.rect, d.rect)
+            return okX && okY && (ov >= 0.25f || dx <= 140)
+        }
+
+        for (t in timeOnly) {
+            var bestJ = -1
+            var bestScore = Int.MAX_VALUE
+
+            for (j in distOnly.indices) {
+                if (usedDist[j]) continue
+                val d = distOnly[j]
+                if (!isClose(t, d)) continue
+
+                val cxT = (t.rect.left + t.rect.right) / 2
+                val cxD = (d.rect.left + d.rect.right) / 2
+                val cyT = (t.rect.top + t.rect.bottom) / 2
+                val cyD = (d.rect.top + d.rect.bottom) / 2
+
+                val score = abs(cxT - cxD) + 2 * abs(cyT - cyD) // preferimos cercanía vertical
+                if (score < bestScore) {
+                    bestScore = score
+                    bestJ = j
                 }
             }
 
-            // Expandimos un poquito para incluir texto dentro (margen)
-            bestRect?.let {
-                val pad = 10
-                it.inset(-pad, -pad)
-                it.left = it.left.coerceAtLeast(0)
-                it.top = it.top.coerceAtLeast(0)
-                it.right = it.right.coerceAtMost(bitmap.width)
-                it.bottom = it.bottom.coerceAtMost(bitmap.height)
+            if (bestJ >= 0) {
+                usedDist[bestJ] = true
+                val d = distOnly[bestJ]
+                val rect = unionRect(t.rect, d.rect).apply {
+                    // pequeño pad para cubrir la cajita completa
+                    inset(-12, -12)
+                }.clampNonNegative()
+
+                paired += TdCandidate(
+                    rect = rect,
+                    td = TimeDistance(seconds = t.seconds!!, meters = d.meters!!),
+                    text = "${t.text} | ${d.text}"
+                )
             }
-
-            return bestRect
         }
 
-        val blueRect = bestComponent(blue)
-        val greenRect = bestComponent(green)
+        // 3) Unimos todos (both + paired) y deduplicamos por td y cercanía
+        val all = (both + paired)
+            .filter { it.td.seconds > 0 && it.td.meters > 0 }
+            .toMutableList()
 
-        if (blueRect == null || greenRect == null) {
-            Log.d(TAG, "detectRouteBoxes: blueRect=$blueRect greenRect=$greenRect")
-            return null
+        // quita falsos raros (distancia absurda por OCR)
+        all.removeAll { it.td.meters > 600_000 } // >600km no aplica aquí
+
+        return dedupeCandidates(all)
+    }
+
+    private fun dedupeCandidates(list: List<TdCandidate>): List<TdCandidate> {
+        if (list.isEmpty()) return emptyList()
+
+        // 1) dedupe por td exacto (seconds, meters) tomando el rect más pequeño (más probable cajita)
+        val byKey = LinkedHashMap<Pair<Int, Int>, TdCandidate>()
+        for (c in list) {
+            val k = c.td.seconds to c.td.meters
+            val prev = byKey[k]
+            if (prev == null) {
+                byKey[k] = c
+            } else {
+                val a1 = prev.rect.width() * prev.rect.height()
+                val a2 = c.rect.width() * c.rect.height()
+                if (a2 < a1) byKey[k] = c
+            }
         }
 
-        return RouteBoxes(
-            blueRect = blueRect,
-            greenRect = greenRect
+        val uniq = byKey.values.toMutableList()
+
+        // 2) dedupe por rect muy cercano (misma caja leída dos veces)
+        val out = ArrayList<TdCandidate>(uniq.size)
+        for (c in uniq) {
+            val keep = out.none { o -> rectNear(o.rect, c.rect) && abs(o.td.meters - c.td.meters) <= 30 }
+            if (keep) out += c
+        }
+
+        return out
+    }
+
+    private fun rectNear(a: android.graphics.Rect, b: android.graphics.Rect): Boolean {
+        val cxA = (a.left + a.right) / 2
+        val cxB = (b.left + b.right) / 2
+        val cyA = (a.top + a.bottom) / 2
+        val cyB = (b.top + b.bottom) / 2
+        val dx = abs(cxA - cxB)
+        val dy = abs(cyA - cyB)
+        return dx <= 90 && dy <= 90
+    }
+
+    private fun unionRect(a: android.graphics.Rect, b: android.graphics.Rect): android.graphics.Rect {
+        return android.graphics.Rect(
+            min(a.left, b.left),
+            min(a.top, b.top),
+            max(a.right, b.right),
+            max(a.bottom, b.bottom)
         )
     }
+
+    private fun android.graphics.Rect.clampNonNegative(): android.graphics.Rect {
+        if (left < 0) left = 0
+        if (top < 0) top = 0
+        if (right < 0) right = 0
+        if (bottom < 0) bottom = 0
+        return this
+    }
+
+    // -----------------------------
+    // OCR text normalization + parsers (robustos)
+    // -----------------------------
+
+    private fun normalizeOcrText(text: String): String {
+        var s = text.lowercase(Locale.ROOT)
+        s = s.replace("\n", " ").replace("|", " ").replace(Regex("""\s+"""), " ").trim()
+
+        // OCR típicos de "min"
+        s = s.replace(Regex("""\bm\s*in\b"""), " min ")
+        s = s.replace(Regex("""\bm1n\b"""), " min ")
+        s = s.replace(Regex("""\bmn\b"""), " min ")
+        s = s.replace(Regex("""\b1n\b"""), " min ")
+        s = s.replace(Regex("""\brnin\b"""), " min ")
+
+        // OCR típicos de "km"
+        s = s.replace(Regex("""\bk\s*m\b"""), " km ")
+        s = s.replace(Regex("""\bkn\b"""), " km ")
+        s = s.replace(Regex("""\bkms\b"""), " km ")
+
+        // decimal coma
+        s = s.replace("，", ",")
+        s = s.replace(Regex("""\s+"""), " ").trim()
+        return s
+    }
+
+    // Tiempo: soporta h/hr/hrs/hora/horas, min/mins, s/seg/sec
+    private fun parseSeconds(s: String): Int? {
+        val t = s.lowercase(Locale.ROOT)
+
+        // hh:mm (poco común aquí, pero por si acaso)
+        Regex("""\b(\d{1,2})\s*:\s*(\d{2})\b""").find(t)?.let { m ->
+            val hh = m.groupValues[1].toIntOrNull()
+            val mm = m.groupValues[2].toIntOrNull()
+            if (hh != null && mm != null) return hh * 3600 + mm * 60
+        }
+
+        Regex("""\b(\d{1,2})\s*(h|hr|hrs|hora|horas)\b""").find(t)?.let { m ->
+            val v = m.groupValues[1].toIntOrNull() ?: return@let
+            return v * 3600
+        }
+
+        Regex("""\b(\d{1,3})\s*(min|mins|min\.)\b""").find(t)?.let { m ->
+            val v = m.groupValues[1].toIntOrNull() ?: return@let
+            return v * 60
+        }
+
+        Regex("""\b(\d{1,3})\s*(s|seg|segs|sec|secs)\b""").find(t)?.let { m ->
+            val v = m.groupValues[1].toIntOrNull() ?: return@let
+            return v
+        }
+
+        return null
+    }
+
+    // Distancia: soporta km/k m/kn y metros (m/mt/mts/metro/metros) evitando confundir con "min"
+    private fun parseMeters(s: String): Int? {
+        val t = s.lowercase(Locale.ROOT)
+
+        Regex("""\b(\d+(?:[.,]\d+)?)\s*(km)\b""").find(t)?.let { m ->
+            val raw = m.groupValues[1].replace(',', '.')
+            val v = raw.toDoubleOrNull() ?: return@let
+            return (v * 1000.0).toInt()
+        }
+
+        // metros (NO aceptar "m" si es parte de min)
+        Regex("""\b(\d+(?:[.,]\d+)?)\s*(mts|mt|metro|metros|m(?!\s*(?:in\b|1n\b|min\b)))\b""")
+            .find(t)?.let { m ->
+                val raw = m.groupValues[1].replace(',', '.')
+                val v = raw.toDoubleOrNull() ?: return@let
+                return v.toInt()
+            }
+
+        return null
+    }
+
+    private fun formatTimeDistance(td: TimeDistance): String {
+        val timeStr = when {
+            td.seconds >= 3600 && td.seconds % 3600 == 0 -> "${td.seconds / 3600} h"
+            td.seconds >= 60 && td.seconds % 60 == 0 -> "${td.seconds / 60} min"
+            td.seconds >= 60 -> "${td.seconds / 60} min ${td.seconds % 60} s"
+            else -> "${td.seconds} s"
+        }
+
+        val distStr = if (td.meters >= 1000) {
+            val km = td.meters / 1000.0
+            String.format(Locale.US, "%.1f km", km)
+        } else {
+            "${td.meters} m"
+        }
+
+        return "$timeStr | $distStr"
+    }
+
     // -----------------------------
     // Image -> Bitmap (RGBA o YUV)
     // -----------------------------
-
     private fun imageToBitmapSafe(image: Image): Bitmap {
         return when (image.format) {
             PixelFormat.RGBA_8888 -> imageToBitmapRgba(image)
@@ -633,9 +725,8 @@ class ScreenOcrService : Service() {
     }
 
     // -----------------------------
-    // Helpers
+    // Helpers / UI / Broadcast
     // -----------------------------
-
     private fun readScreenMetrics() {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val dm = DisplayMetrics()
@@ -678,11 +769,11 @@ class ScreenOcrService : Service() {
         sendBroadcast(out)
     }
 
-    private fun sendOcrResult(text: String, debug: String) {
+    private fun sendOcrResult(text: String) {
         val out = Intent(DDContracts.ACTION_OCR_RESULT).apply {
             setPackage(packageName)
             putExtra(DDContracts.EXTRA_OCR_TEXT, text)
-            putExtra(DDContracts.EXTRA_OCR_DEBUG, debug)
+            putExtra(DDContracts.EXTRA_OCR_DEBUG, "")
         }
         sendBroadcast(out)
     }
