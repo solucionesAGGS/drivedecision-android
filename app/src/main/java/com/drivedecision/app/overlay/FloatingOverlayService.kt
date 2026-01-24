@@ -251,85 +251,168 @@ class FloatingOverlayService : Service() {
     private data class Offer(val amountMx: Double, val label: String)
     private data class Td(val minutes: Int, val km: Double, val src: String)
 
+
+    private data class TdInfo(
+        val pickup: Td,
+        val trip: Td,
+        val totalMinutes: Int,
+        val totalKm: Double
+    )
+
+    /**
+     * Lee el resultado del OCR FULLSCREEN (ScreenOcrService) sin tocar su lógica.
+     * Espera líneas:
+     *  - "PICKUP (min): 17 min | 8.5 km"
+     *  - "TOTAL  (max): 11 min | 9.7 km"   <-- aquí "TOTAL" es el RECORRIDO (max meters)
+     *
+     * Devuelve pickup+recorrido y calcula totales (sumas).
+     */
+    private fun parsePickupAndTripTd(ocrText: String): TdInfo? {
+        if (ocrText.isBlank()) return null
+        val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
+
+        fun parseAfterColon(line: String): Td? {
+            val part = line.substringAfter(":", line)
+            val km = parseDistanceKm(part) ?: return null
+            val min = parseDurationMinutes(part) ?: return null
+            return Td(min, km, "OCR")
+        }
+
+        val pickupLine = lines.firstOrNull { it.contains("PICKUP", ignoreCase = true) }
+        val totalLine = lines.firstOrNull { it.startsWith("TOTAL", ignoreCase = true) || it.contains("TOTAL", ignoreCase = true) }
+
+        val pickup = pickupLine?.let { parseAfterColon(it) }
+        val trip = totalLine?.let { parseAfterColon(it) }
+
+        if (pickup != null && trip != null) {
+            return TdInfo(
+                pickup = pickup,
+                trip = trip,
+                totalMinutes = pickup.minutes + trip.minutes,
+                totalKm = pickup.km + trip.km
+            )
+        }
+
+        // Fallback: si no vino en formato PICKUP/TOTAL, usamos lo existente (max km)
+        val one = parseTotalTd(ocrText) ?: return null
+        return TdInfo(
+            pickup = Td(0, 0.0, "NONE"),
+            trip = one,
+            totalMinutes = one.minutes,
+            totalKm = one.km
+        )
+    }
+
     private fun renderOutput() {
-        val out = StringBuilder()
-
-        // 1) Mostrar info base (para debug)
-        if (lastAccText.isNotBlank()) {
-            out.appendLine("=== ACCESS ===")
-            out.appendLine(lastAccText.trim())
-            out.appendLine()
-        }
-        if (lastOcrText.isNotBlank()) {
-            out.appendLine("=== OCR ===")
-            out.appendLine(lastOcrText.trim())
-            out.appendLine()
-        }
-
-        // 2) Intentar parsear ofertas y TD
         val offers = parseOffers(lastAccText)
-        val td = parseTotalTd(lastOcrText)
+        val tdInfo = parsePickupAndTripTd(lastOcrText)
 
-        if (offers.isEmpty()) {
-            out.appendLine("⚠️ No detecté ofertas (MXN) en accessibility.")
-            txtOutput?.text = out.toString()
-            return
-        }
-        if (td == null) {
-            out.appendLine("⚠️ No detecté TIEMPO+DISTANCIA en OCR.")
-            txtOutput?.text = out.toString()
+        // Si falta algo, mostramos SOLO lo mínimo
+        if (offers.isEmpty() || tdInfo == null) {
+            val out = StringBuilder()
+            if (offers.isEmpty()) out.appendLine("⚠️ No detecté ofertas (MXN) todavía.")
+            if (tdInfo == null) out.appendLine("⚠️ No detecté PICKUP + RECORRIDO (OCR).")
+            txtOutput?.text = out.toString().trim()
             return
         }
 
-        // 3) Calcular métricas por cada oferta
         val s = DDSettings.load(this)
 
-        val totalHours = td.minutes.toDouble() / 60.0
-        val speed = if (totalHours > 0) td.km / totalHours else 0.0 // km/h
+        val pickup = tdInfo.pickup
+        val trip = tdInfo.trip
+
+        val totalMin = tdInfo.totalMinutes
+        val totalKm = tdInfo.totalKm
+
+        val totalHours = totalMin.toDouble() / 60.0
+        val speed = if (totalHours > 0) totalKm / totalHours else 0.0 // km/h
         val kmPerL = blendedKmPerL(speed, s.cityKmPerL, s.hwyKmPerL)
 
-        val gasLiters = if (kmPerL > 0) td.km / kmPerL else 0.0
+        // ✅ Costos variables con km totales (pickup + recorrido)
+        val gasLiters = if (kmPerL > 0) totalKm / kmPerL else 0.0
         val gasCost = gasLiters * s.fuelPrice
-        val otherCost = td.km * s.otherCostPerKm
-        val variableCost = gasCost + otherCost
+        val wearCost = totalKm * s.otherCostPerKm
+        val variableCost = gasCost + wearCost
 
-        out.appendLine("=== ANÁLISIS (TD total) ===")
-        out.appendLine("TD: ${td.minutes} min | ${fmtKm(td.km)} km  (src=${td.src})")
-        out.appendLine("Vel prom: ${fmt1(speed)} km/h  | Rend est: ${fmt1(kmPerL)} km/L")
-        out.appendLine("Costo var aprox: $${fmt2(variableCost)}  (gas=$${fmt2(gasCost)} + otros=$${fmt2(otherCost)})")
-        out.appendLine("Mínimo deseado (neto/h): $${fmt2(s.minNetPerHour)}")
-        out.appendLine()
+        // Orden: pasajero primero, luego contraofertas
+        val passengerOffer = offers.firstOrNull { it.label == "ACEPTAR" }
+        val counterOffers = offers.filter { it.label != "ACEPTAR" }
+            .distinctBy { it.amountMx }
+            .sortedBy { it.amountMx }
 
-        val sorted = offers.distinctBy { it.amountMx }.sortedByDescending { it.amountMx }.take(10)
+        val displayOffers = buildList {
+            passengerOffer?.let { add(it) }
+            addAll(counterOffers.take(6))
+        }
 
-        out.appendLine("=== OFERTAS (top) ===")
-        for (o in sorted) {
+        data class OfferMetrics(
+            val offer: Offer,
+            val gross: Double,
+            val net: Double,
+            val netPerHour: Double,
+            val grossPerKmTrip: Double
+        )
+
+        fun metricsFor(o: Offer): OfferMetrics {
             val gross = o.amountMx
             val net = gross - variableCost
-            val payPerHour = if (totalHours > 0) net / totalHours else 0.0
-            val payPerKmGross = if (td.km > 0) gross / td.km else 0.0
-            val ok = payPerHour >= s.minNetPerHour
+            val netPerHour = if (totalHours > 0) net / totalHours else 0.0
 
-            out.appendLine("${if (ok) "✅" else "❌"} ${o.label}: $${fmt0(gross)} | net/h=$${fmt0(payPerHour)} | $/km(gross)=$${fmt2(payPerKmGross)}")
+            // ✅ tarifa/km del pasajero = SOLO recorrido (trip), NO pickup
+            val tripKm = trip.km.coerceAtLeast(0.001)
+            val grossPerKmTrip = gross / tripKm
+
+            return OfferMetrics(o, gross, net, netPerHour, grossPerKmTrip)
         }
 
-        val bestOk = sorted
-            .map { o ->
-                val net = o.amountMx - variableCost
-                val payPerHour = if (totalHours > 0) net / totalHours else 0.0
-                o to payPerHour
+        val allMetrics = displayOffers.map { metricsFor(it) }
+
+        // ✅ Recomendación correcta:
+        // 1) si pasajero cumple → aceptar
+        // 2) si no → la MÁS BARATA que cumpla
+        // 3) si ninguna → sugerir mínimo requerido
+        val minNetH = s.minNetPerHour
+        val passengerOk = passengerOffer?.let { metricsFor(it).netPerHour >= minNetH } ?: false
+
+        val recommendation = if (passengerOk && passengerOffer != null) {
+            "✅ ACEPTAR: ${fmtMoney(passengerOffer.amountMx)} (cumple tu mínimo)"
+        } else {
+            val bestCheapest = counterOffers
+                .map { it to metricsFor(it).netPerHour }
+                .filter { it.second >= minNetH }
+                .minByOrNull { it.first.amountMx }
+
+            if (bestCheapest != null) {
+                "✅ Recomienda: ${fmtMoney(bestCheapest.first.amountMx)} (la más barata que cumple)"
+            } else {
+                val requiredGross = variableCost + (minNetH * totalHours)
+                "❌ Ninguna cumple. Sugerido mínimo: ${fmtMoney(roundUpToStep(requiredGross, 1.0))}"
             }
-            .filter { it.second >= s.minNetPerHour }
-            .maxByOrNull { it.second }
+        }
+
+        // --- OUTPUT MINIMAL ---
+        val out = StringBuilder()
+        out.appendLine("PICKUP: ${pickup.minutes} min | ${fmtKm(pickup.km)} km")
+        out.appendLine("RECORRIDO: ${trip.minutes} min | ${fmtKm(trip.km)} km")
+        out.appendLine("TOTAL: ${totalMin} min | ${fmtKm(totalKm)} km")
+        out.appendLine("Costo var: ${fmtMoney(variableCost)} (gas ${fmtMoney(gasCost)} + desgaste ${fmtMoney(wearCost)})")
+        out.appendLine("Mínimo objetivo: ${fmtMoney(minNetH)}/h")
+        out.appendLine()
+
+        out.appendLine("Ofertas:")
+        allMetrics.forEach { m ->
+            val ok = m.netPerHour >= minNetH
+            val tag = if (ok) "✅" else "❌"
+            val label = if (m.offer.label == "ACEPTAR") "PASAJERO" else m.offer.label
+
+            // ✅ net primero, luego net/h, y tarifa/km solo recorrido
+            out.appendLine("$tag $label ${fmtMoney(m.gross)} | net ${fmtMoney(m.net)} | net/h ${fmtMoney(m.netPerHour)} | (tarifa/km rec ${fmtMoney(m.grossPerKmTrip)})")
+        }
 
         out.appendLine()
-        if (bestOk != null) {
-            out.appendLine("⭐ Recomendación: ${bestOk.first.label} (net/h≈$${fmt0(bestOk.second)})")
-        } else {
-            out.appendLine("⭐ Recomendación: Ninguna oferta cumple tu mínimo neto/h.")
-        }
+        out.appendLine(recommendation)
 
-        txtOutput?.text = out.toString()
+        txtOutput?.text = out.toString().trim()
     }
 
     private fun parseOffers(text: String): List<Offer> {
@@ -510,4 +593,12 @@ class FloatingOverlayService : Service() {
     private fun fmt1(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
     private fun fmt2(v: Double): String = String.format(java.util.Locale.US, "%.2f", v)
     private fun fmtKm(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
+    private fun fmtMoney(v: Double): String = "$" + fmt2(v)
+
+    private fun roundUpToStep(value: Double, step: Double): Double {
+        if (step <= 0.0) return value
+        val k = kotlin.math.ceil(value / step)
+        return k * step
+    }
+
 }
