@@ -58,7 +58,7 @@ class ScreenOcrService : Service() {
         private const val NOTIF_CHANNEL_ID = "dd_ocr_channel"
         private const val NOTIF_ID = 2001
     }
-
+    private var projectionCallback: MediaProjection.Callback? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var mediaProjection: MediaProjection? = null
@@ -152,19 +152,31 @@ class ScreenOcrService : Service() {
         }
     }
 
-    private fun registerProjectionCallbackIfNeeded(mp: MediaProjection) {
-        if (projectionCallbackRegistered) return
+    private fun registerProjectionCallbackIfNeeded(mp: MediaProjection): Boolean {
+        if (projectionCallbackRegistered) return true
 
-        mp.registerCallback(object : Callback() {
+        val cb = object : MediaProjection.Callback() {
             override fun onStop() {
-                Log.w(TAG, "📴 MediaProjection STOPPED by system")
-                projectionCallbackRegistered = false
-                stopProjection("projection stopped by system")
+                Log.w(TAG, "MediaProjection stopped")
+                stopProjection("MediaProjection onStop")
             }
-        }, mainHandler)
+        }
 
-        projectionCallbackRegistered = true
-        Log.d(TAG, "✅ MediaProjection.registerCallback() OK")
+        // IMPORTANTE:
+        // Aunque en Android 14+ existe un overload con Executor, si tu proyecto compila con compileSdk < 34
+        // ese overload NO existe en stubs y rompe compilación.
+        // Usamos siempre el overload clásico (Callback, Handler) que funciona en todas las APIs.
+        return try {
+            @Suppress("DEPRECATION")
+            mp.registerCallback(cb, mainHandler)
+            projectionCallbackRegistered = true
+            projectionCallback = cb
+            Log.d(TAG, "✅ registerCallback(Callback, Handler) OK")
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "❌ No pude registrar callback: ${t.message}", t)
+            false
+        }
     }
 
     private fun stopProjection(reason: String) {
@@ -177,6 +189,12 @@ class ScreenOcrService : Service() {
 
         try { imageReader?.close() } catch (_: Throwable) {}
         imageReader = null
+
+        val cb = projectionCallback
+        if (cb != null) {
+            try { mediaProjection?.unregisterCallback(cb) } catch (_: Throwable) {}
+        }
+        projectionCallback = null
 
         try { mediaProjection?.stop() } catch (_: Throwable) {}
         mediaProjection = null
@@ -206,6 +224,13 @@ class ScreenOcrService : Service() {
     private fun recreateCapturePipeline(from: String) {
         val mp = mediaProjection ?: return
         Log.d(TAG, "recreateCapturePipeline(from=$from)")
+        // Android 14+/15: ensure MediaProjection callback is registered BEFORE createVirtualDisplay()
+        if (!registerProjectionCallbackIfNeeded(mp)) {
+            sendOcrError("No se pudo registrar callback de MediaProjection (Android exige esto).")
+            stopProjection("callback register failed")
+            return
+        }
+
 
         try { virtualDisplay?.release() } catch (_: Throwable) {}
         virtualDisplay = null

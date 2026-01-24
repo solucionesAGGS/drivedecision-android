@@ -7,6 +7,8 @@ object DDContracts {
     const val ACTION_READ_REQUEST = "com.drivedecision.app.ACTION_READ_REQUEST"
     const val ACTION_READ_RESULT  = "com.drivedecision.app.ACTION_READ_RESULT"
     const val EXTRA_RESULT_TEXT   = "extra_result_text"
+    // Alias (algunos archivos usaron este nombre)
+    const val EXTRA_READ_TEXT     = EXTRA_RESULT_TEXT
 
     // ===== OCR / Captura (MediaProjection + MLKit) =====
     const val ACTION_START_PROJECTION = "com.drivedecision.app.ocr.ACTION_START_PROJECTION"

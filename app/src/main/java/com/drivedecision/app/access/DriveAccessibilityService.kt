@@ -5,151 +5,173 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Rect
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.drivedecision.app.DDContracts
 
+/**
+ * Lee texto accesible (principalmente de inDrive) y manda un dump por broadcast.
+ * También extrae ofertas MXN de botones/textos.
+ */
 class DriveAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "DD_ACC"
-
-        // SharedPreferences donde guardamos el rect del mapa
-        private const val PREFS = "dd_prefs"
-        private const val K_L = "map_left"
-        private const val K_T = "map_top"
-        private const val K_R = "map_right"
-        private const val K_B = "map_bottom"
-        private const val K_TS = "map_ts"
+        private const val TARGET_PACKAGE = "sinet.startup.inDriver"
     }
 
-    private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
-
-    private val readReceiver = object : BroadcastReceiver() {
+    private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == DDContracts.ACTION_READ_REQUEST) {
-                readNowAndSendOnce()
+            if (intent == null) return
+            when (intent.action) {
+                DDContracts.ACTION_READ_REQUEST -> {
+                    // Forzar una lectura inmediata cuando overlay lo pida
+                    try {
+                        val dump = readCurrentWindowDump()
+                        sendReadResult(dump)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "READ_REQUEST error: ${t.message}", t)
+                        sendReadResult("❌ READ_REQUEST error: ${t.message}")
+                    }
+                }
             }
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        Log.d(TAG, "onServiceConnected()")
 
-        val filter = IntentFilter().apply {
-            addAction(DDContracts.ACTION_READ_REQUEST)
+        // 🔧 FIX: Android 13+ exige RECEIVER_EXPORTED / RECEIVER_NOT_EXPORTED al registrar receivers dinámicos
+        try {
+            val filter = IntentFilter(DDContracts.ACTION_READ_REQUEST)
+            registerReceiverCompat(receiver, filter)
+            Log.d(TAG, "Receiver registrado OK (${DDContracts.ACTION_READ_REQUEST})")
+        } catch (t: Throwable) {
+            Log.e(TAG, "No pude registrar receiver: ${t.message}", t)
         }
+    }
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(readReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(readReceiver, filter)
-        }
-
-        Log.d(TAG, "✅ Accessibility conectado y receiver registrado")
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(receiver)
+        } catch (_: Throwable) {}
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // No usamos el stream de eventos para no generar “sopa” / overhead.
-        // Solo leemos cuando nos piden ACTION_READ_REQUEST.
+        if (event == null) return
+
+        // Filtra por paquete (inDrive)
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg != TARGET_PACKAGE) return
+
+        // Leemos ventana actual (si está disponible)
+        try {
+            val dump = readCurrentWindowDump()
+            if (dump.isNotBlank()) {
+                sendReadResult(dump)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "onAccessibilityEvent read error: ${t.message}", t)
+        }
     }
 
     override fun onInterrupt() {}
 
-    override fun onDestroy() {
-        try { unregisterReceiver(readReceiver) } catch (_: Throwable) {}
-        super.onDestroy()
+    // -----------------------------
+    // Compat receiver registration
+    // -----------------------------
+    private fun registerReceiverCompat(receiver: BroadcastReceiver, filter: IntentFilter) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            // No expongas este receiver a otras apps
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(receiver, filter)
+        }
     }
 
-    private fun readNowAndSendOnce() {
-        val root = rootInActiveWindow
-        if (root == null) {
-            sendResult("APP_AL_FRENTE: (sin rootInActiveWindow)")
-            return
+    // -----------------------------
+    // Read / dump current window
+    // -----------------------------
+    private fun readCurrentWindowDump(): String {
+        val root = rootInActiveWindow ?: return ""
+
+        // A veces root viene pero sin contenido; pequeño retry rápido
+        if (root.childCount == 0) {
+            SystemClock.sleep(30)
         }
 
-        // 1) Guarda bounds del mapa (si los encontramos)
-        updateMapBoundsIfPossible(root)
+        val sb = StringBuilder(4096)
+        sb.append("=== ACCESSIBILITY DUMP ===\n")
+        sb.append("pkg=").append(root.packageName).append("\n")
+        sb.append("cls=").append(root.className).append("\n\n")
 
-        // 2) Saca texto de accesibilidad (lo que ya te sirve hoy)
-        val lines = mutableListOf<String>()
+        // Dump completo (texto visible)
+        dumpNodeText(root, sb)
 
-        val pkg = root.packageName?.toString() ?: "(null)"
-        val cls = root.className?.toString() ?: "(null)"
-        lines += "APP_AL_FRENTE: $pkg"
-        lines += "CLASS: $cls"
+        // Extra: ofertas detectadas
+        val offers = extractOffersMxnFromText(sb.toString())
+        if (offers.isNotEmpty()) {
+            sb.append("\n=== OFFERS MXN ===\n")
+            offers.distinct().sorted().forEach { sb.append("MXN").append(it).append("\n") }
+        }
 
-        val collected = mutableListOf<String>()
-        collectTexts(root, collected)
-
-        lines += "TOTAL_TEXTOS: ${collected.size}"
-        lines += "-----"
-        lines += collected.joinToString("\n")
-
-        sendResult(lines.joinToString("\n"))
+        return sb.toString()
     }
 
-    private fun sendResult(text: String) {
-        sendBroadcast(
-            Intent(DDContracts.ACTION_READ_RESULT).apply {
+    private fun dumpNodeText(node: AccessibilityNodeInfo, sb: StringBuilder) {
+        try {
+            val t = node.text?.toString()
+            val cd = node.contentDescription?.toString()
+            val vid = node.viewIdResourceName
+
+            if (!t.isNullOrBlank()) sb.append(t).append("\n")
+            if (!cd.isNullOrBlank()) sb.append(cd).append("\n")
+            if (!vid.isNullOrBlank()) sb.append("id=").append(vid).append("\n")
+
+            val n = node.childCount
+            for (i in 0 until n) {
+                val c = node.getChild(i) ?: continue
+                dumpNodeText(c, sb)
+            }
+        } catch (_: Throwable) {
+            // no-op
+        }
+    }
+
+    // -----------------------------
+    // Offers parsing
+    // -----------------------------
+    private fun extractOffersMxnFromText(allText: String): List<Int> {
+        val s = allText.lowercase()
+
+        // Match "mxn118", "mxn 118", "MXN 1,234" etc.
+        val out = ArrayList<Int>(8)
+        val re = Regex("""\bmxn\s*([0-9]{2,5})\b""")
+        re.findAll(s).forEach { m ->
+            val v = m.groupValues[1].toIntOrNull()
+            if (v != null) out += v
+        }
+        return out
+    }
+
+    // -----------------------------
+    // Broadcast result
+    // -----------------------------
+    private fun sendReadResult(text: String) {
+        try {
+            val out = Intent(DDContracts.ACTION_READ_RESULT).apply {
                 setPackage(packageName)
-                putExtra(DDContracts.EXTRA_RESULT_TEXT, text)
+                putExtra(DDContracts.EXTRA_READ_TEXT, text)
             }
-        )
-        Log.d(TAG, "➡️ READ_RESULT enviado len=${text.length}")
-    }
-
-    private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<String>) {
-        val t = node.text?.toString()?.trim()
-        if (!t.isNullOrBlank()) out.add(t)
-
-        val cd = node.contentDescription?.toString()?.trim()
-        if (!cd.isNullOrBlank() && cd != t) out.add(cd)
-
-        for (i in 0 until node.childCount) {
-            val c = node.getChild(i) ?: continue
-            collectTexts(c, out)
+            sendBroadcast(out)
+        } catch (t: Throwable) {
+            Log.e(TAG, "sendReadResult error: ${t.message}", t)
         }
-    }
-
-    /**
-     * Busca un nodo que represente el mapa (“Mapa de Google”) y guarda sus boundsInScreen.
-     * Esto nos permite recortar la captura SOLO al área del mapa.
-     */
-    private fun updateMapBoundsIfPossible(root: AccessibilityNodeInfo) {
-        val mapNode = findNodeByTextOrDesc(root, "Mapa de Google")
-        if (mapNode != null) {
-            val r = Rect()
-            mapNode.getBoundsInScreen(r)
-            if (r.width() > 50 && r.height() > 50) {
-                prefs.edit()
-                    .putInt(K_L, r.left)
-                    .putInt(K_T, r.top)
-                    .putInt(K_R, r.right)
-                    .putInt(K_B, r.bottom)
-                    .putLong(K_TS, System.currentTimeMillis())
-                    .apply()
-                Log.d(TAG, "🗺️ Map bounds guardados: $r")
-            }
-        }
-    }
-
-    private fun findNodeByTextOrDesc(node: AccessibilityNodeInfo, needle: String): AccessibilityNodeInfo? {
-        val t = node.text?.toString()
-        val cd = node.contentDescription?.toString()
-
-        if (t?.contains(needle, ignoreCase = true) == true) return node
-        if (cd?.contains(needle, ignoreCase = true) == true) return node
-
-        for (i in 0 until node.childCount) {
-            val c = node.getChild(i) ?: continue
-            val found = findNodeByTextOrDesc(c, needle)
-            if (found != null) return found
-        }
-        return null
     }
 }

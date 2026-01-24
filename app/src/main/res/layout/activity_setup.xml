@@ -7,49 +7,96 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Configuración (DriveDecision)"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:paddingBottom="12dp"/>
+
+        <!-- Meta mínima -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Mínimo neto deseado por hora (MXN/h)"
+            android:paddingTop="8dp"/>
 
         <EditText
-            android:id="@+id/etConsumo"
+            android:id="@+id/etMinNetPerHour"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Consumo (km/l o l/100km)"
-            android:inputType="numberDecimal" />
+            android:inputType="numberDecimal"
+            android:hint="Ej: 90"
+            android:importantForAutofill="no"/>
+
+        <!-- Gasolina -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Precio gasolina (MXN/L)"
+            android:paddingTop="12dp"/>
 
         <EditText
-            android:id="@+id/etGasolina"
+            android:id="@+id/etFuelPrice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Costo gasolina promedio"
-            android:inputType="numberDecimal" />
+            android:inputType="numberDecimal"
+            android:hint="Ej: 24.0"
+            android:importantForAutofill="no"/>
+
+        <!-- Rendimientos -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Rendimiento ciudad (km/L)"
+            android:paddingTop="12dp"/>
 
         <EditText
-            android:id="@+id/etDesgaste"
+            android:id="@+id/etCityKmPerL"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Desgaste por km (opcional)"
-            android:inputType="numberDecimal" />
+            android:inputType="numberDecimal"
+            android:hint="Ej: 10"
+            android:importantForAutofill="no"/>
 
-        <LinearLayout
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Rendimiento carretera (km/L)"
+            android:paddingTop="12dp"/>
+
+        <EditText
+            android:id="@+id/etHwyKmPerL"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingTop="12dp">
+            android:inputType="numberDecimal"
+            android:hint="Ej: 14"
+            android:importantForAutofill="no"/>
 
-            <Button
-                android:id="@+id/btnGuardar"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Guardar" />
+        <!-- Extra por km -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Costo extra por km (mantenimiento) MXN/km (opcional)"
+            android:paddingTop="12dp"/>
 
-            <Button
-                android:id="@+id/btnCancelar"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Cancelar" />
-        </LinearLayout>
+        <EditText
+            android:id="@+id/etOtherCostPerKm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:hint="Ej: 0.50"
+            android:importantForAutofill="no"/>
+
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Guardar"
+            android:layout_marginTop="18dp"/>
 
     </LinearLayout>
 </ScrollView>

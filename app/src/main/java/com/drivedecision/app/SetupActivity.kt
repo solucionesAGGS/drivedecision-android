@@ -3,40 +3,53 @@ package com.drivedecision.app
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class SetupActivity : AppCompatActivity() {
 
-    private lateinit var etConsumo: EditText
-    private lateinit var etGasolina: EditText
-    private lateinit var etDesgaste: EditText
-    private lateinit var btnGuardar: Button
-    private lateinit var btnCancelar: Button
+    private fun EditText.readDoubleOr(default: Double): Double {
+        val s = text?.toString()?.trim().orEmpty()
+        return s.replace(',', '.').toDoubleOrNull() ?: default
+    }
+
+    private fun EditText.setDouble(v: Double) {
+        setText(if (v % 1.0 == 0.0) v.toInt().toString() else v.toString())
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_setup)
 
-        etConsumo = findViewById(R.id.etConsumo)
-        etGasolina = findViewById(R.id.etGasolina)
-        etDesgaste = findViewById(R.id.etDesgaste)
-        btnGuardar = findViewById(R.id.btnGuardar)
-        btnCancelar = findViewById(R.id.btnCancelar)
+        val etMinNetPerHour = findViewById<EditText>(R.id.etMinNetPerHour)
+        val etFuelPrice = findViewById<EditText>(R.id.etFuelPrice)
+        val etCityKmPerL = findViewById<EditText>(R.id.etCityKmPerL)
+        val etHwyKmPerL = findViewById<EditText>(R.id.etHwyKmPerL)
+        val etOtherCostPerKm = findViewById<EditText>(R.id.etOtherCostPerKm)
+        val btnSave = findViewById<Button>(R.id.btnSave)
 
-        val p = DDSettings.prefs(this)
-        etConsumo.setText(p.getString(DDSettings.K_CONSUMO, "") ?: "")
-        etGasolina.setText(p.getString(DDSettings.K_GASOLINA, "") ?: "")
-        etDesgaste.setText(p.getString(DDSettings.K_DESGASTE, "") ?: "")
+        // Cargar defaults / valores actuales
+        etMinNetPerHour.setDouble(DDSettings.getMinNetPerHour(this))
+        etFuelPrice.setDouble(DDSettings.getFuelPrice(this))
+        etCityKmPerL.setDouble(DDSettings.getCityKmPerL(this))
+        etHwyKmPerL.setDouble(DDSettings.getHwyKmPerL(this))
+        etOtherCostPerKm.setDouble(DDSettings.getOtherCostPerKm(this))
 
-        btnGuardar.setOnClickListener {
-            DDSettings.prefs(this).edit()
-                .putString(DDSettings.K_CONSUMO, etConsumo.text?.toString()?.trim() ?: "")
-                .putString(DDSettings.K_GASOLINA, etGasolina.text?.toString()?.trim() ?: "")
-                .putString(DDSettings.K_DESGASTE, etDesgaste.text?.toString()?.trim() ?: "")
-                .apply()
+        btnSave.setOnClickListener {
+            val minNet = etMinNetPerHour.readDoubleOr(DDSettings.getMinNetPerHour(this)).coerceAtLeast(0.0)
+            val fuel = etFuelPrice.readDoubleOr(DDSettings.getFuelPrice(this)).coerceAtLeast(0.0)
+            val city = etCityKmPerL.readDoubleOr(DDSettings.getCityKmPerL(this)).coerceAtLeast(1.0)
+            val hwy = etHwyKmPerL.readDoubleOr(DDSettings.getHwyKmPerL(this)).coerceAtLeast(1.0)
+            val other = etOtherCostPerKm.readDoubleOr(DDSettings.getOtherCostPerKm(this)).coerceAtLeast(0.0)
+
+            DDSettings.setMinNetPerHour(this, minNet)
+            DDSettings.setFuelPrice(this, fuel)
+            DDSettings.setCityKmPerL(this, city)
+            DDSettings.setHwyKmPerL(this, hwy)
+            DDSettings.setOtherCostPerKm(this, other)
+
+            Toast.makeText(this, "✅ Guardado", Toast.LENGTH_SHORT).show()
             finish()
         }
-
-        btnCancelar.setOnClickListener { finish() }
     }
 }
