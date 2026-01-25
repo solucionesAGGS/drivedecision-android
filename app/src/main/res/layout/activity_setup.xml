@@ -91,6 +91,24 @@
             android:hint="Ej: 0.50"
             android:importantForAutofill="no"/>
 
+
+        <!-- Cuota -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Cuota (%) sobre el pago"
+            android:textStyle="bold"
+            android:layout_marginTop="12dp"/>
+
+        <EditText
+            android:id="@+id/etFeePct"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:hint="Ej: 10"
+            android:maxLines="1"
+            android:importantForAutofill="no"/>
+
         <Button
             android:id="@+id/btnSave"
             android:layout_width="match_parent"

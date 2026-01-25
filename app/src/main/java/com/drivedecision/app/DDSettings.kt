@@ -26,12 +26,16 @@ object DDSettings {
     // Costo variable extra por km (llantas, aceite, mantenimiento) MXN/km
     private const val K_OTHER_COST_PER_KM = "other_cost_per_km"
 
+    // Cuota (%) sobre el pago (se descuenta del bruto)
+    private const val K_FEE_PCT = "fee_pct"
+
     // Defaults (ajústalos si quieres)
     private const val DEF_FUEL_PRICE = 24.0
     private const val DEF_CITY_KM_PER_L = 10.0
     private const val DEF_HWY_KM_PER_L = 14.0
     private const val DEF_MIN_NET_PER_HOUR = 90.0
     private const val DEF_OTHER_COST_PER_KM = 0.0
+    private const val DEF_FEE_PCT = 0.0
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -70,6 +74,14 @@ object DDSettings {
         prefs(ctx).edit().putFloat(K_OTHER_COST_PER_KM, v.toFloat()).apply()
     }
 
+
+    fun getFeePct(ctx: Context): Double =
+        prefs(ctx).getFloat(K_FEE_PCT, DEF_FEE_PCT.toFloat()).toDouble()
+
+    fun setFeePct(ctx: Context, v: Double) {
+        prefs(ctx).edit().putFloat(K_FEE_PCT, v.toFloat()).apply()
+    }
+
     /**
      * Snapshot de settings para leerlos una sola vez.
      * (La overlay lo usa en cada análisis, evita accesos repetidos a prefs.)
@@ -79,7 +91,8 @@ object DDSettings {
         val cityKmPerL: Double,
         val hwyKmPerL: Double,
         val minNetPerHour: Double,
-        val otherCostPerKm: Double
+        val otherCostPerKm: Double,
+        val feePct: Double
     )
 
     fun load(ctx: Context): Snapshot = Snapshot(
@@ -87,7 +100,8 @@ object DDSettings {
         cityKmPerL = getCityKmPerL(ctx),
         hwyKmPerL = getHwyKmPerL(ctx),
         minNetPerHour = getMinNetPerHour(ctx),
-        otherCostPerKm = getOtherCostPerKm(ctx)
+        otherCostPerKm = getOtherCostPerKm(ctx),
+        feePct = getFeePct(ctx)
     )
 
 

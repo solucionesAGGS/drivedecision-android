@@ -26,6 +26,7 @@ class SetupActivity : AppCompatActivity() {
         val etCityKmPerL = findViewById<EditText>(R.id.etCityKmPerL)
         val etHwyKmPerL = findViewById<EditText>(R.id.etHwyKmPerL)
         val etOtherCostPerKm = findViewById<EditText>(R.id.etOtherCostPerKm)
+        val etFeePct = findViewById<EditText>(R.id.etFeePct)
         val btnSave = findViewById<Button>(R.id.btnSave)
 
         // Cargar defaults / valores actuales
@@ -34,6 +35,7 @@ class SetupActivity : AppCompatActivity() {
         etCityKmPerL.setDouble(DDSettings.getCityKmPerL(this))
         etHwyKmPerL.setDouble(DDSettings.getHwyKmPerL(this))
         etOtherCostPerKm.setDouble(DDSettings.getOtherCostPerKm(this))
+        etFeePct.setDouble(DDSettings.getFeePct(this))
 
         btnSave.setOnClickListener {
             val minNet = etMinNetPerHour.readDoubleOr(DDSettings.getMinNetPerHour(this)).coerceAtLeast(0.0)
@@ -41,12 +43,14 @@ class SetupActivity : AppCompatActivity() {
             val city = etCityKmPerL.readDoubleOr(DDSettings.getCityKmPerL(this)).coerceAtLeast(1.0)
             val hwy = etHwyKmPerL.readDoubleOr(DDSettings.getHwyKmPerL(this)).coerceAtLeast(1.0)
             val other = etOtherCostPerKm.readDoubleOr(DDSettings.getOtherCostPerKm(this)).coerceAtLeast(0.0)
+            val feePct = etFeePct.readDoubleOr(DDSettings.getFeePct(this)).coerceIn(0.0, 100.0)
 
             DDSettings.setMinNetPerHour(this, minNet)
             DDSettings.setFuelPrice(this, fuel)
             DDSettings.setCityKmPerL(this, city)
             DDSettings.setHwyKmPerL(this, hwy)
             DDSettings.setOtherCostPerKm(this, other)
+            DDSettings.setFeePct(this, feePct)
 
             Toast.makeText(this, "✅ Guardado", Toast.LENGTH_SHORT).show()
             finish()

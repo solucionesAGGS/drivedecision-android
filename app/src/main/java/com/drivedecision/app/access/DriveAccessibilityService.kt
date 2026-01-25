@@ -23,6 +23,16 @@ class DriveAccessibilityService : AccessibilityService() {
         private const val TARGET_PACKAGE = "sinet.startup.inDriver"
     }
 
+
+    private var lastNonTargetSentAt = 0L
+
+    private fun sendNotInDrive(pkg: String) {
+        val out = Intent(DDContracts.ACTION_READ_RESULT).apply {
+            setPackage(packageName)
+            putExtra(DDContracts.EXTRA_READ_TEXT, "=== NOT INDRIVE ===\npkg=$pkg\n")
+        }
+        sendBroadcast(out)
+    }
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -65,11 +75,23 @@ class DriveAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        // Filtra por paquete (inDrive)
         val pkg = event.packageName?.toString() ?: return
-        if (pkg != TARGET_PACKAGE) return
 
-        // Leemos ventana actual (si está disponible)
+        // ✅ Si NO es inDrive, avisa al overlay para que cierre el panel (sin spamear)
+        if (pkg != TARGET_PACKAGE) {
+            val isWindowChange =
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                        event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+
+            val now = SystemClock.elapsedRealtime()
+            if (isWindowChange && now - lastNonTargetSentAt > 500) {
+                lastNonTargetSentAt = now
+                sendNotInDrive(pkg)
+            }
+            return
+        }
+
+        // ✅ inDrive: Leemos ventana actual (si está disponible)
         try {
             val dump = readCurrentWindowDump()
             if (dump.isNotBlank()) {

@@ -10,7 +10,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -59,6 +62,18 @@ class FloatingOverlayService : Service() {
     private var lastAccText: String = ""
     private var lastOcrText: String = ""
 
+    // ===== Auto-open (inDrive + "Solicitud de viaje") =====
+    private var isOfferScreen: Boolean = false
+    private var lastAutoOcrAt: Long = 0L
+    private var lastSignature: String = ""
+    // Estabilización de auto-OCR (evita capturar mientras el UI cambia)
+    private var pendingSignature: String = ""
+    private var pendingSince: Long = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var isOcrInFlight: Boolean = false
+    private var ocrCooldownUntil: Long = 0L
+
     private val resultsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -66,12 +81,52 @@ class FloatingOverlayService : Service() {
                 DDContracts.ACTION_READ_RESULT -> {
                     val t = intent.getStringExtra(DDContracts.EXTRA_READ_TEXT) ?: ""
                     lastAccText = if (t.isBlank()) "(vacio)" else t
+                    // 🔒 Si hay OCR en curso, NO muestres/ocultes panel aquí (podría tapar el mapa en la captura)
+                    if (isOcrInFlight) {
+                        // Solo actualiza el texto interno; la visibilidad se restaura en ACTION_OCR_RESULT
+                        renderOutput()
+                        return
+                    }
+
+
+                    // ✅ Auto-mostrar / ocultar panel SOLO en inDrive cuando detecta "Solicitud de viaje"
+                    val norm = normalize(lastAccText)
+
+                    // Señal explícita desde Accessibility cuando NO es inDrive
+                    val forcedNotInDrive = norm.contains("not indrive")
+
+                    // El dump normal trae "pkg=sinet.startup.inDriver"
+                    val inDrive = norm.contains("pkg=${DDContracts.INDRIVE_PACKAGE.lowercase()}")
+
+                    val nowOfferScreen = (!forcedNotInDrive) && inDrive && containsSolicitudDeViaje(lastAccText)
+
+                    if (!nowOfferScreen) {
+                        isOfferScreen = false
+                        showPanelOnly(false) // deja la burbuja, quita el panel
+                        renderOutput()
+                        return
+                    }
+
+                    val wasOffer = isOfferScreen
+                    isOfferScreen = true
+                    showPanelOnly(true)
+
+                    // Firma para detectar cambio de solicitud y auto-analizar
+                    val signature = buildStableSignature(norm)
+
+                    if (!wasOffer) {
+                        lastSignature = "" // fuerza OCR al entrar a la pantalla objetivo
+                    }
+                    maybeAutoOcr(signature)
+
                     renderOutput()
                 }
                 DDContracts.ACTION_OCR_RESULT -> {
                     val t = intent.getStringExtra(DDContracts.EXTRA_OCR_TEXT) ?: ""
                     lastOcrText = if (t.isBlank()) "(vacio)" else t
                     // OCR listo -> vuelve a mostrar overlay
+                    isOcrInFlight = false
+                    ocrCooldownUntil = SystemClock.elapsedRealtime() + 900L
                     setOverlayVisible(true)
                     renderOutput()
                 }
@@ -232,9 +287,72 @@ class FloatingOverlayService : Service() {
         }
     }
 
+    // ---------------- Auto-open logic (inDrive + "Solicitud de viaje") ----------------
+
+    private fun normalize(s: String): String {
+        val n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+        return n.replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "").lowercase()
+    }
+
+    private fun containsSolicitudDeViaje(raw: String): Boolean {
+        val s = normalize(raw)
+        return s.contains("solicitud de viaje")
+    }
+
+    private fun showPanelOnly(show: Boolean) {
+        if (isOcrInFlight) {
+            // No cambies visibilidad mientras capturamos, para no tapar el mapa
+            return
+        }
+
+        // La burbuja DD siempre visible
+        bubbleView?.visibility = View.VISIBLE
+        panelView?.visibility = if (show) View.VISIBLE else View.GONE
+    }
+
+    private fun maybeAutoOcr(signature: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (isOcrInFlight) return
+        if (now < ocrCooldownUntil) return
+        if (now - lastAutoOcrAt < 1200) return // debounce duro
+        if (signature == lastSignature) return
+
+        // --- Estabilización: requiere que la misma firma se mantenga ~280ms ---
+        if (signature != pendingSignature) {
+            pendingSignature = signature
+            pendingSince = now
+            // Revisa otra vez en 280ms si sigue igual
+            mainHandler.removeCallbacksAndMessages(null)
+            mainHandler.postDelayed({
+                val now2 = SystemClock.elapsedRealtime()
+                if (isOcrInFlight) return@postDelayed
+                if (now2 < ocrCooldownUntil) return@postDelayed
+                if (pendingSignature != signature) return@postDelayed
+                if (now2 - pendingSince < 260) return@postDelayed
+
+                // ok estable -> dispara OCR
+                lastAutoOcrAt = now2
+                lastSignature = signature
+                requestOcrOnce()
+            }, 280L)
+            return
+        }
+
+        // ya era la misma firma; si ya pasó el tiempo suficiente, dispara sin esperar al callback
+        if (now - pendingSince >= 280) {
+            lastAutoOcrAt = now
+            lastSignature = signature
+            requestOcrOnce()
+        }
+    }
+
+
+
     // ---------------- OCR trigger ----------------
 
     private fun requestOcrOnce() {
+        if (isOcrInFlight) return
+        isOcrInFlight = true
         // ocultar overlay para que no estorbe en la captura
         setOverlayVisible(false)
 
@@ -279,10 +397,15 @@ class FloatingOverlayService : Service() {
         }
 
         val pickupLine = lines.firstOrNull { it.contains("PICKUP", ignoreCase = true) }
-        val totalLine = lines.firstOrNull { it.startsWith("TOTAL", ignoreCase = true) || it.contains("TOTAL", ignoreCase = true) }
+
+        // ✅ RECORRIDO es lo que queremos como "trip". TOTAL suele ser pickup+recorrido.
+        val tripLine =
+            lines.firstOrNull { it.contains("RECORRIDO", ignoreCase = true) }
+                ?: lines.firstOrNull { it.contains("TOTAL", ignoreCase = true) && it.contains("max", ignoreCase = true) }
+                ?: lines.lastOrNull { it.startsWith("TOTAL", ignoreCase = true) }
 
         val pickup = pickupLine?.let { parseAfterColon(it) }
-        val trip = totalLine?.let { parseAfterColon(it) }
+        val trip = tripLine?.let { parseAfterColon(it) }
 
         if (pickup != null && trip != null) {
             return TdInfo(
@@ -348,6 +471,7 @@ class FloatingOverlayService : Service() {
         data class OfferMetrics(
             val offer: Offer,
             val gross: Double,
+            val fee: Double,
             val net: Double,
             val netPerHour: Double,
             val grossPerKmTrip: Double
@@ -355,14 +479,15 @@ class FloatingOverlayService : Service() {
 
         fun metricsFor(o: Offer): OfferMetrics {
             val gross = o.amountMx
-            val net = gross - variableCost
+            val fee = gross * (s.feePct / 100.0)
+            val net = gross - variableCost - fee
             val netPerHour = if (totalHours > 0) net / totalHours else 0.0
 
             // ✅ tarifa/km del pasajero = SOLO recorrido (trip), NO pickup
             val tripKm = trip.km.coerceAtLeast(0.001)
             val grossPerKmTrip = gross / tripKm
 
-            return OfferMetrics(o, gross, net, netPerHour, grossPerKmTrip)
+            return OfferMetrics(o, gross, fee, net, netPerHour, grossPerKmTrip)
         }
 
         val allMetrics = displayOffers.map { metricsFor(it) }
@@ -396,6 +521,7 @@ class FloatingOverlayService : Service() {
         out.appendLine("RECORRIDO: ${trip.minutes} min | ${fmtKm(trip.km)} km")
         out.appendLine("TOTAL: ${totalMin} min | ${fmtKm(totalKm)} km")
         out.appendLine("Costo var: ${fmtMoney(variableCost)} (gas ${fmtMoney(gasCost)} + desgaste ${fmtMoney(wearCost)})")
+        out.appendLine("Cuota: ${fmt2(s.feePct)}% (se descuenta del pago)")
         out.appendLine("Mínimo objetivo: ${fmtMoney(minNetH)}/h")
         out.appendLine()
 
@@ -406,7 +532,7 @@ class FloatingOverlayService : Service() {
             val label = if (m.offer.label == "ACEPTAR") "PASAJERO" else m.offer.label
 
             // ✅ net primero, luego net/h, y tarifa/km solo recorrido
-            out.appendLine("$tag $label ${fmtMoney(m.gross)} | net ${fmtMoney(m.net)} | net/h ${fmtMoney(m.netPerHour)} | (tarifa/km rec ${fmtMoney(m.grossPerKmTrip)})")
+            out.appendLine("$tag $label ${fmtMoney(m.gross)} | cuota ${fmtMoney(m.fee)} | net ${fmtMoney(m.net)} | net/h ${fmtMoney(m.netPerHour)} | (tarifa/km rec ${fmtMoney(m.grossPerKmTrip)})")
         }
 
         out.appendLine()
@@ -599,6 +725,45 @@ class FloatingOverlayService : Service() {
         if (step <= 0.0) return value
         val k = kotlin.math.ceil(value / step)
         return k * step
+    }
+
+    // Firma "estable" para no disparar OCR por texto dinámico (ej: "53 seg", "hace 1 min")
+    private fun buildStableSignature(norm: String): String {
+        // norm ya debe venir en lowercase (tu normalize() lo hace)
+        val lines = norm.split('\n')
+        val keep = ArrayList<String>(64)
+
+        for (raw in lines) {
+            val line = raw.trim()
+            if (line.isBlank()) continue
+
+            // descarta cosas que cambian cada segundo y rompen la firma
+            if (Regex("""\b\d+\s*seg\b""").containsMatchIn(line)) continue
+            if (Regex("""\b\d+\s*segs\b""").containsMatchIn(line)) continue
+            if (Regex("""\bhace\s*\d+\s*(?:min|mins|seg|segs)\b""").containsMatchIn(line)) continue
+            if (Regex("""\b\d+\s*(?:min|mins)\b""").containsMatchIn(line) && line.length <= 12) continue
+
+            // qué SI mantenemos (texto estable que define una solicitud)
+            if (
+                line.contains("solicitud de viaje") ||
+                line.contains("mxn") ||
+                line.contains("aceptar por") ||
+                line.contains("ofrece tu tarifa") ||
+                line.contains("pkg=") ||
+                line.contains("not indrive") ||
+                line.contains("pickup") ||
+                line.contains("recorrido") ||
+                line.contains("total")
+            ) {
+                keep.add(line)
+            }
+        }
+
+        // Si por alguna razón quedara vacío, fallback seguro
+        if (keep.isEmpty()) return norm.take(1200)
+
+        // Junta y recorta para que sea estable y ligera
+        return keep.joinToString("\n").take(1200)
     }
 
 }
